@@ -16110,6 +16110,7 @@ function ledDetail(r, cols) {
   opt("Effort", r.effort);
   if (r.cache_write || r.cache_read) opt("Cache", t("{w} written · {r} read", { w: ledNum(r.cache_write || 0), r: ledNum(r.cache_read || 0) }) + cacheTTLs(r, ledNum));
   if (ledRowSpeed(r)) add("Speed", t("{n} tok/s", { n: ledNum(Math.round(ledRowSpeed(r))) }));
+  else if (ledFloorSpeed(r)) add("Speed", "≥" + t("{n} tok/s", { n: ledNum(Math.round(ledFloorSpeed(r))) }));
   add("Request ID", r.rid);
   add("Endpoint", r.ep);
   const protos = ledProtos(r);
@@ -16919,6 +16920,20 @@ const ledDecode = (r) => {
 };
 // how fast a reply wrote, in tokens a second: 0 when it can't tell
 const ledRowSpeed = (r) => { const d = ledDecode(r); return d ? d.n / (d.w / 1000) : 0; };
+// the least a reply read from a session file wrote at, in tokens a second:
+// the file has no first token, only when the line that asked for it and its
+// last line were written (Claude Code's are each block's end), so its tokens
+// over that whole time, the wait for the first one in it, are a floor the
+// speed after the first token can't be under. Against Claude Code's own
+// stream it read 2–5% under for a reply of 1,400 tokens or more, 11–33% for
+// a shorter one or one asked with a tool's result, so only a reply of 1,000
+// or more is told. 0 when it tells none, and a call magpie timed tells its
+// own (ledDecode). Only the row's: the period's speed counts timed calls.
+const ledFloorSpeed = (r) => {
+  if (r.source !== "log" || ledFailed_(r) || ledRowSpeed(r)) return 0;
+  if (!(r.out >= 1000 && r.ms >= 1000 && r.out * 1000 <= 10000 * r.ms)) return 0;
+  return r.out / (r.ms / 1000);
+};
 
 // the table as wide as the window, when leaving out what the row's details
 // say anyway makes it so: else it scrolls sideways (#799)
@@ -17184,11 +17199,12 @@ function renderLedger() {
     td(untimed ? "—" : (timed ? "≈" : "") + ledTook(r.ms), "n duration " + (untimed ? "faint" : "duration-" + durationBand),
       [!untimed ? t("{n} ms", { n: ledNum(r.ms) }) : "", !untimed ? t("Duration colors: ≤10 s green · 10–30 s amber · >30 s red") : "", timed && !untimed ? t("About: told from the session file's times, a little more or less than it took") : "", r.ttft_ms ? t("TTFT {ms}", { ms: ledTook(r.ttft_ms) }) : ""].filter(Boolean).join(" · "));
     // how fast it wrote once it began, as CC Switch's log has it (#860)
-    const v = ledRowSpeed(r);
-    td(v ? t("{n} tok/s", { n: ledNum(Math.round(v)) }) : "—", "n speed" + (v ? "" : " faint"),
+    const v = ledRowSpeed(r), floor = ledFloorSpeed(r);
+    td(v ? t("{n} tok/s", { n: ledNum(Math.round(v)) }) : floor ? "≥" + t("{n} tok/s", { n: ledNum(Math.round(floor)) }) : "—", "n speed" + (v || floor ? "" : " faint"),
       v ? (r.reasoning > 0 ? t("{n} answer tokens in {ms} after the first text, the {r} reasoning tokens before it left out", { n: ledNum(ledDecode(r).n), ms: ledTook(ledDecode(r).w), r: ledNum(r.reasoning) })
         : t("{n} output tokens in {ms} after the first", { n: ledNum(r.out), ms: ledTook(r.ms - r.ttft_ms) })) + " · " + t("TTFT {ms}", { ms: ledTook(r.ttft_ms) })
-        : r.ttft_ms || untimed || ledFailed_(r) ? "" : t("Not streamed: no first token to time a speed from"));
+        : floor ? t("At least: {n} output tokens in {ms}, from the line that asked for it to its last. The session file has no first token, so the wait for it is counted too", { n: ledNum(r.out), ms: ledTook(r.ms) })
+        : r.ttft_ms || untimed || ledFailed_(r) ? "" : timed ? t("The session file has no first token to time a speed from") : t("Not streamed: no first token to time a speed from"));
     const st = el("span", "st");
     // a status when the gateway logged the call; a session file has none,
     // and says only whether it went well
